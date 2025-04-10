@@ -1,4 +1,3 @@
 subdir/
 scratch-simulator.cc
 .gitignore
-jarbas-grazy-wifi.cc~
