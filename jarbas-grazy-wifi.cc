@@ -1,0 +1,121 @@
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/netanim-module.h"
+#include "ns3/flow-monitor-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE ("JarbasGrazyWifi");
+
+int main (int argc, char *argv[])
+{
+      Time::SetResolution (Time::NS);
+      LogComponentEnable("UdpClient", LOG_LEVEL_INFO);
+      LogComponentEnable("UdpServer", LOG_LEVEL_INFO);
+
+      NodeContainer nodes;
+      nodes.Create(3); // 0 = Roteador, 1 = Jarbas, 2 = Grazy
+
+      // Nomear os nós
+      Names::Add("Router", nodes.Get(0));
+      Names::Add("Jarbas", nodes.Get(1));
+      Names::Add("Grazy", nodes.Get(2));
+
+      // Wifi
+      WifiHelper wifi;
+      wifi.SetStandard(WIFI_PHY_STANDARD_80211g);
+      YansWifiPhyHelper phy = YansWifiPhyHelper::Default();
+      YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
+      phy.SetChannel(channel.Create());
+
+      WifiMacHelper mac;
+      Ssid ssid = Ssid("ns3-wifi");
+      mac.SetType("ns3::StaWifiMac", "Ssid", SsidValue(ssid), "ActiveProbing", BooleanValue(false));
+      NetDeviceContainer staDevices = wifi.Install(phy, mac, NodeContainer(nodes.Get(1), nodes.Get(2)));
+
+      mac.SetType("ns3::ApWifiMac", "Ssid", SsidValue(ssid));
+      NetDeviceContainer apDevice = wifi.Install(phy, mac, nodes.Get(0));
+
+      // Mobilidade
+      MobilityHelper mobility;
+      Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+      positionAlloc->Add(Vector(0.0, 0.0, 0.0)); // Router
+      positionAlloc->Add(Vector(1.0, 1.0, 0.0)); // Jarbas
+      positionAlloc->Add(Vector(-1.0, 1.0, 0.0)); // Grazy
+      mobility.SetPositionAllocator(positionAlloc);
+
+      mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+      mobility.Install(nodes.Get(0)); // Router fixo
+
+      mobility.SetMobilityModel("ns3::WaypointMobilityModel");
+      mobility.Install(nodes.Get(1)); // Jarbas
+      mobility.Install(nodes.Get(2)); // Grazy
+
+      Ptr<WaypointMobilityModel> jarbasMob = nodes.Get(1)->GetObject<WaypointMobilityModel>();
+      Ptr<WaypointMobilityModel> grazyMob = nodes.Get(2)->GetObject<WaypointMobilityModel>();
+
+    // Jarbas: se move suavemente na linha Y=0, indo e voltando no eixo X
+    // Grazy: se move suavemente na linha X=0, indo e voltando no eixo Y
+
+    for (uint32_t i = 0; i <= 25; ++i) {
+      double dist = 1.0 + i * (49.0 / 25.0); // de 1m até 50m suave
+      jarbasMob->AddWaypoint(Waypoint(Seconds(i), Vector(dist, 0.0, 0.0))); // esquerda
+      grazyMob->AddWaypoint(Waypoint(Seconds(i), Vector(0.0, dist, 0.0)));   // baixo (Y+)
+    }
+    for (uint32_t i = 26; i <= 50; ++i) {
+      double dist = 1.0 + (50 - i) * (49.0 / 25.0); // voltando para 1m
+      jarbasMob->AddWaypoint(Waypoint(Seconds(i), Vector(dist, 0.0, 0.0))); // volta da esquerda
+      grazyMob->AddWaypoint(Waypoint(Seconds(i), Vector(0.0, dist, 0.0)));   // volta do baixo
+    }
+
+      // Pilha TCP/IP
+      InternetStackHelper stack;
+      stack.Install(nodes);
+
+      Ipv4AddressHelper address;
+      address.SetBase("10.1.1.0", "255.255.255.0");
+      Ipv4InterfaceContainer interfaces = address.Assign(NetDeviceContainer(apDevice, staDevices));
+
+      // Aplicações
+      UdpServerHelper udpServer(4000);
+      ApplicationContainer serverApp = udpServer.Install(nodes.Get(0)); // No roteador
+      serverApp.Start(Seconds(1.0));
+      serverApp.Stop(Seconds(60.0));
+
+      UdpClientHelper udpClient(interfaces.GetAddress(0), 4000);
+      udpClient.SetAttribute("MaxPackets", UintegerValue(10000));
+      udpClient.SetAttribute("Interval", TimeValue(Seconds(1.0)));
+      udpClient.SetAttribute("PacketSize", UintegerValue(1024));
+
+      ApplicationContainer clientApps;
+      clientApps.Add(udpClient.Install(nodes.Get(1))); // Jarbas
+      clientApps.Add(udpClient.Install(nodes.Get(2))); // Grazy
+      clientApps.Start(Seconds(2.0));
+      clientApps.Stop(Seconds(60.0));
+
+      // NetAnim
+      AnimationInterface anim("netanim.xml");
+      anim.SetConstantPosition(nodes.Get(0), 0.0, 0.0);
+      anim.UpdateNodeDescription(nodes.Get(0), "Router");
+      anim.UpdateNodeDescription(nodes.Get(1), "Jarbas");
+      anim.UpdateNodeDescription(nodes.Get(2), "Grazy");
+
+      anim.EnablePacketMetadata(true);
+      anim.EnableIpv4RouteTracking("routing.xml", Seconds(0.0), Seconds(60.0), Seconds(1.0));
+
+      // Monitoramento
+      FlowMonitorHelper flowmon;
+      Ptr<FlowMonitor> monitor = flowmon.InstallAll();
+
+      Simulator::Stop(Seconds(60.0));
+      Simulator::Run();
+
+      monitor->SerializeToXmlFile("flowmon.xml", true, true);
+      Simulator::Destroy();
+
+      return 0;
+}
